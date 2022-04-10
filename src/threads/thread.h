@@ -4,6 +4,10 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
+
+
+
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -89,10 +93,13 @@ struct thread
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
-
+    
+    int priority_orgn;
+    struct lock *waiting_lock;
+    struct list donators;
+    struct list_elem dnt_elem;
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
-
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
@@ -141,4 +148,13 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
+bool priority_less_func(const struct list_elem *a,
+			const struct list_elem *b,
+                        void *aux);
+void cmpp_with_readylist(void);
+
+
+void donate_to_holders(void);
+void drop_donators(struct lock *lock);
+void renew_holder(void);
 #endif /* threads/thread.h */

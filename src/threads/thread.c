@@ -28,7 +28,7 @@ static struct list ready_list;
 
 /* new block list for timer*/
 static struct list block_list;
-static struct thread *blocked;
+//static struct thread *blocked;
 
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
@@ -76,6 +76,65 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+
+bool priority_less_func(const struct list_elem *a,
+			const struct list_elem *b,
+                        void *aux){
+	return list_entry(b,struct thread, elem)->priority < list_entry(a,struct thread, elem)->priority;
+}
+
+void cmpp_with_readylist(void){
+	if(list_empty(&ready_list)) return;
+	int cur_prior = thread_get_priority();
+	struct list_elem *max= list_begin(&ready_list);
+	struct thread *max_rdy = list_entry(max, struct thread, elem);
+	int rdy_prior = max_rdy->priority;
+	if(rdy_prior > cur_prior){
+		thread_yield();
+	}
+}
+
+void donate_to_holders(void){
+	struct thread *cur = thread_current();
+	int cur_prior = cur->priority;
+	int depth = 8;
+	while(depth > 0){
+		if(cur->waiting_lock == NULL){
+			break;
+		}
+		cur = cur->waiting_lock->holder;
+		cur->priority = cur_prior;
+		//struct semaphore *sema_cur = &cur->waiting_lock->semaphore;
+		//list_sort(&sema_cur->waiters, priority_less_func, NULL);
+		depth--;	
+	}
+}
+void drop_donators(struct lock *lock){
+	struct thread *cur = thread_current();
+	struct list_elem *cur_e = list_begin(&cur->donators);
+	while(cur_e != list_end(&cur->donators)){
+		struct thread *donator = list_entry(cur_e, struct thread, dnt_elem);	
+		if(donator->waiting_lock != lock){
+			cur_e = list_next(cur_e);		
+		}
+		else{
+			cur_e = list_remove(cur_e);
+		}
+	}
+}
+void renew_holder(void){
+	struct thread *cur = thread_current();
+	cur->priority = cur->priority_orgn;
+	if(!list_empty(&cur->donators)){
+		struct thread *max_dntr;
+		list_sort(&cur->donators, priority_less_func, NULL);
+		max_dntr = list_entry(list_front(&cur->donators), struct thread, dnt_elem);
+		if(cur->priority < max_dntr->priority){
+			cur->priority = max_dntr->priority;		
+		}
+	}
+}
+
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -141,25 +200,31 @@ thread_tick (void)
   else
     kernel_ticks++;
 
-  struct list_elem *b_elem;
-  struct thread *b_cur;	
-  int i = 0;
-  int j = 0;
-  for(i = 0; i < list_size(&block_list); i++){
-	b_elem = list_head(&block_list)->next;
-	for(j = 0;j < i;j++){
-		b_elem = b_elem->next; 	
-	}
-	b_cur = list_entry(b_elem, struct thread, elem);
-	if(b_cur != NULL){
-		b_cur->restTicks = b_cur->restTicks - 1;
-		if(b_cur->restTicks == 0){
-			list_remove(b_elem);
-			thread_unblock(b_cur);
+
+  if(!list_empty (&block_list)){
+	  struct list_elem *b_elem;
+	  struct list_elem *r_elem;
+	  struct thread *b_cur;	
+	  b_elem = list_begin(&block_list);
+	  while(b_elem != list_end(&block_list)){
+		b_cur = list_entry(b_elem, struct thread, elem);
+		if(b_cur != NULL){
+			b_cur->restTicks = b_cur->restTicks - 1;
+			if(b_cur->restTicks == 0){
+				r_elem = b_elem;
+ 				b_elem = list_next(b_elem);
+				list_remove(r_elem);
+				thread_unblock(b_cur);
+			}
+			else{
+				b_elem = list_next(b_elem);
+			}
 		}
-	}
+		
+	  }
   }
 
+  
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
@@ -237,7 +302,7 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-
+  cmpp_with_readylist();
   return tid;
 }
 
@@ -257,6 +322,7 @@ thread_block (void)
   
   schedule ();
 }
+void
 thread_block_new (int64_t restTicks)
 {
   enum intr_level old_level;
@@ -288,8 +354,10 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list, &t->elem, priority_less_func, NULL);
+  //list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
+  
   intr_set_level (old_level);
 }
 
@@ -357,8 +425,10 @@ thread_yield (void)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
-  if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+  if (cur != idle_thread){
+    list_insert_ordered (&ready_list, &cur->elem, priority_less_func, NULL);
+    //list_push_back (&ready_list, &cur->elem);
+  }
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -380,12 +450,14 @@ thread_foreach (thread_action_func *func, void *aux)
       func (t, aux);
     }
 }
-
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  thread_current ()->priority_orgn = new_priority;
+  thread_current ()->priority = new_priority;	
+  renew_holder();
+  cmpp_with_readylist();
 }
 
 /* Returns the current thread's priority. */
@@ -510,6 +582,11 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+
+  t->priority_orgn = priority;
+  t->waiting_lock = NULL;
+  list_init(&t->donators);
+
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
 }
@@ -624,6 +701,9 @@ allocate_tid (void)
 
   return tid;
 }
+
+
+
 
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
